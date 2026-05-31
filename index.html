@@ -1,0 +1,541 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Hearthhold</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<style>html,body,#root{height:100%;margin:0;font-family:system-ui,sans-serif;}</style>
+<script type="importmap">
+{
+  "imports": {
+    "react": "https://esm.sh/react@18.3.1",
+    "react-dom/client": "https://esm.sh/react-dom@18.3.1/client?external=react",
+    "lucide-react": "https://esm.sh/lucide-react@0.383.0?external=react"
+  }
+}
+</script>
+</head>
+<body>
+<div id="root"></div>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<script type="text/babel" data-type="module" data-presets="react">
+import { useState, useEffect, useRef, useMemo, useCallback, memo } from "react";
+import { createRoot } from "react-dom/client";
+import { Hammer, Sparkles, Trash2, RotateCcw, ChevronUp, Lock, Swords, MousePointer2 } from "lucide-react";
+
+// 로컬 저장(localStorage)
+if (typeof window !== "undefined" && !window.storage) {
+  window.storage = {
+    async get(k){ const v=localStorage.getItem(k); return v==null?null:{value:v}; },
+    async set(k,v){ localStorage.setItem(k,v); return {value:v}; },
+    async delete(k){ localStorage.removeItem(k); return {deleted:true}; },
+  };
+}
+
+const COLS = 13, ROWS = 9;
+const MAP = [
+  "TT..SS...CC..","T...S.....C..","...........II","......K....I.",".WW..........",
+  ".W......GG...","FF.....R....D","F......R.....","....E........",
+];
+const CH = { ".": "grass", "K": "keep", "W": "water", "T": "tree", "S": "stone", "C": "coal", "I": "iron", "G": "gold", "D": "diamond", "R": "redstone", "E": "emerald", "F": "food" };
+const TERRAIN = MAP.map(row => row.split("").map(c => CH[c] || "grass"));
+const RES = {
+  wood: { name: "목재", icon: "🪵", gather: 4, cat: "wood" }, stone: { name: "돌", icon: "🪨", gather: 4, cat: "mined" },
+  food: { name: "식량", icon: "🌾", gather: 3, cat: "food" }, coal: { name: "석탄", icon: "⚫", gather: 3, cat: "mined" },
+  iron: { name: "철", icon: "🔩", gather: 2, cat: "mined" }, gold: { name: "금", icon: "🟡", gather: 2, cat: "mined" },
+  redstone: { name: "레드스톤", icon: "🔴", gather: 2, cat: "mined" }, diamond: { name: "다이아", icon: "💎", gather: 1, cat: "mined" }, emerald: { name: "에메랄드", icon: "💚", gather: 1, cat: "mined" },
+};
+const RES_ORDER = ["wood", "stone", "food", "coal", "iron", "gold", "redstone", "diamond", "emerald"];
+const FEAT = {
+  tree: { res: "wood", icon: "🌳", bg: "#5e9e51" }, stone: { res: "stone", icon: "🪨", bg: "#9aa0a6" },
+  coal: { res: "coal", icon: "⚫", bg: "#6b7077" }, iron: { res: "iron", icon: "🔩", bg: "#b9a999" },
+  gold: { res: "gold", icon: "🟡", bg: "#c9b15a" }, redstone: { res: "redstone", icon: "🔴", bg: "#b07a7a" },
+  diamond: { res: "diamond", icon: "💎", bg: "#7fc7d6" }, emerald: { res: "emerald", icon: "💚", bg: "#5fae7e" }, food: { res: "food", icon: "🌾", bg: "#cdbf6a" },
+};
+let _keep = { x: 6.5, y: 3.5 };
+for (let r = 0; r < ROWS; r++) for (let c = 0; c < COLS; c++) if (TERRAIN[r][c] === "keep") _keep = { x: c + 0.5, y: r + 0.5 };
+const KEEP = _keep;
+const NODES = [];
+const NODE_MAP = Array.from({ length: ROWS }, () => Array(COLS).fill(null));
+for (let r = 0; r < ROWS; r++) for (let c = 0; c < COLS; c++) { const f = FEAT[TERRAIN[r][c]]; if (f) { const n = { x: c + 0.5, y: r + 0.5, r, c, res: f.res }; NODES.push(n); NODE_MAP[r][c] = n; } }
+const NODES_SORTED = [...NODES].sort((a, b) => ((a.x - KEEP.x) ** 2 + (a.y - KEEP.y) ** 2) - ((b.x - KEEP.x) ** 2 + (b.y - KEEP.y) ** 2));
+const NODE_POOL = Math.max(1, Math.min(NODES_SORTED.length, 10));
+const BUILDINGS = [
+  { key: "hut", name: "일꾼 오두막", icon: "⛺", hotkey: "H", desc: "일꾼 +1", cost: { wood: 30, food: 10 }, scale: 0.6, place: "grass", build: 5 },
+  { key: "storage", name: "창고", icon: "📦", hotkey: "D", desc: "저장량 +200", cost: { wood: 40, stone: 30 }, scale: 0.5, place: "grass", build: 6 },
+  { key: "mill", name: "제재소", icon: "🪚", hotkey: "L", desc: "목재 +25% (나무 옆)", cost: { wood: 20, stone: 20 }, scale: 0.5, place: "nearTree", build: 6 },
+  { key: "mine", name: "광산", icon: "⛏️", hotkey: "M", desc: "광물 +20% (광맥 옆)", cost: { wood: 25, iron: 8 }, scale: 0.5, place: "nearMined", build: 7 },
+  { key: "farm", name: "농장", icon: "🚜", hotkey: "F", desc: "식량 +30% (밭 옆)", cost: { wood: 20, stone: 10 }, scale: 0.5, place: "nearFood", build: 6 },
+];
+const DECOR = [
+  { key: "bush", name: "정원수", icon: "🌳", cost: { wood: 8 }, charm: 3, build: 2 },
+  { key: "flower", name: "꽃밭", icon: "🌷", cost: { wood: 8, food: 4 }, charm: 5, build: 2 },
+  { key: "rock", name: "바위", icon: "🪨", cost: { stone: 10 }, charm: 4, build: 2 },
+  { key: "lantern", name: "등불", icon: "🏮", cost: { wood: 6, coal: 4 }, charm: 6, build: 2 },
+  { key: "fence", name: "울타리", icon: "🪵", cost: { wood: 6 }, charm: 2, build: 1 },
+  { key: "path", name: "돌길", icon: "🟫", cost: { stone: 6 }, charm: 2, build: 1 },
+  { key: "fountain", name: "분수", icon: "⛲", cost: { stone: 25, iron: 8 }, charm: 15, build: 4 },
+  { key: "statue", name: "석상", icon: "🗿", cost: { stone: 30, gold: 10 }, charm: 20, build: 5 },
+  { key: "rslamp", name: "레드스톤 램프", icon: "🔴", cost: { redstone: 8, iron: 4 }, charm: 12, build: 3 },
+  { key: "gemtower", name: "보석탑", icon: "💠", cost: { diamond: 5, emerald: 3, gold: 8 }, charm: 40, build: 6 },
+];
+const KEY_INFO = {};
+BUILDINGS.forEach(b => KEY_INFO[b.key] = { ...b, kind: "building" });
+DECOR.forEach(d => KEY_INFO[d.key] = { ...d, kind: "decor" });
+const KEEP_LEVELS = [
+  { cap: 300, workers: 4 }, { cap: 600, workers: 7, cost: { wood: 120, stone: 80 } },
+  { cap: 1000, workers: 10, cost: { wood: 260, stone: 200, iron: 40 } }, { cap: 1600, workers: 14, cost: { wood: 500, stone: 420, gold: 60, iron: 80 } },
+];
+const NAMES = ["도토리", "감자", "뭉치", "구름", "단풍", "보리", "해돌", "두부", "방울", "바위", "초록", "밤톨", "송이", "개굴", "나비", "호두", "팥쥐", "두유"];
+const CAT_LABEL = { wood: "벌목", mined: "채광", food: "농사" };
+const TOOL_TYPES = [{ type: "axe", label: "도끼", icon: "🪓", cat: "wood" }, { type: "pickaxe", label: "곡괭이", icon: "⛏️", cat: "mined" }, { type: "hoe", label: "괭이", icon: "🌾", cat: "food" }];
+const GEAR_TYPES = [{ type: "boots", label: "신발", icon: "👢" }, { type: "bag", label: "가방", icon: "🎒" }, { type: "gloves", label: "장갑", icon: "🧤" }];
+const TIER_COST = [{ wood: 15, stone: 10 }, { stone: 25, iron: 8 }, { iron: 20, gold: 10 }, { diamond: 4, gold: 15 }];
+const xpNext = (lv) => 20 + lv * 15;
+const STARTING_WORKERS = 3, SPEED = 2.2, MINE_TIME = 1.0, ARRIVE = 0.07, SAVE_KEY = "hearthhold_save_v3";
+const FORM = [[0, 0], [0.5, 0], [-0.5, 0], [0, 0.5], [0, -0.5], [0.5, 0.5], [-0.5, 0.5], [0.5, -0.5], [-0.5, -0.5], [1, 0], [-1, 0], [0, 1], [0, -1]];
+const formO = i => { const f = FORM[i % FORM.length]; return { dx: f[0], dy: f[1] }; };
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+const emptyGrid = () => Array.from({ length: ROWS }, () => Array.from({ length: COLS }, () => null));
+const rid = () => Math.random().toString(36).slice(2);
+
+function ResourceBar({ resources, cap }) {
+  return (
+    <div className="flex flex-wrap items-center gap-1">
+      {RES_ORDER.map(k => {
+        const v = Math.floor(resources[k] || 0), near = v >= cap * 0.95;
+        return (
+          <div key={k} title={RES[k].name} className={`flex items-center gap-0.5 rounded-md px-1.5 py-0.5 text-[11px] shadow-sm ${v > 0 ? "bg-white/90" : "bg-white/50 opacity-50"}`}>
+            <span>{RES[k].icon}</span><span className={`font-bold ${near ? "text-red-500" : "text-stone-800"}`}>{v}</span>
+          </div>
+        );
+      })}
+      <span className="text-[10px] text-stone-500 ml-1">한도 {cap}</span>
+    </div>
+  );
+}
+const ResourceBarM = memo(ResourceBar);
+function TabBtn({ active, onClick, icon, label }) {
+  return <button onClick={onClick} className={`flex-1 flex items-center justify-center gap-1 text-xs font-semibold rounded-lg py-1.5 transition ${active ? "bg-emerald-600 text-white" : "bg-white text-stone-600 hover:bg-emerald-50"}`}>{icon}{label}</button>;
+}
+const Board = memo(function Board({ placed, siteCells, keepLevel, selBuild, mode, hover, canPlace, fT, fP }) {
+  const item = (mode === "build" && selBuild) ? KEY_INFO[selBuild] : null;
+  return (
+    <div className="absolute inset-0 grid" style={{ gridTemplateColumns: `repeat(${COLS},1fr)`, gridTemplateRows: `repeat(${ROWS},1fr)` }}>
+      {TERRAIN.map((row, r) => row.map((t, c) => {
+        const cell = placed[r][c], isKeep = t === "keep", feat = FEAT[t];
+        let bg = (r + c) % 2 === 0 ? "#84c06d" : "#7bb866";
+        if (t === "water") bg = "#5aa6dd"; if (feat) bg = feat.bg;
+        const hasSite = siteCells.has(`${r}-${c}`), isHover = hover && hover.r === r && hover.c === c;
+        let overlay = null;
+        if (isHover) {
+          if (mode === "remove") { if (cell || hasSite) overlay = "rgba(220,60,60,0.35)"; }
+          else if (item) overlay = canPlace(r, c, item) ? "rgba(80,210,90,0.42)" : "rgba(220,60,60,0.32)";
+        }
+        return (
+          <div key={`${r}-${c}`} style={{ background: bg, position: "relative", display: "flex", alignItems: "center", justifyContent: "center", boxShadow: "inset 0 0 0 1px rgba(0,0,0,0.06)", userSelect: "none" }}>
+            {feat && <span style={{ fontSize: fT }}>{feat.icon}</span>}
+            {t === "water" && <span style={{ fontSize: fT, opacity: 0.85 }}>🌊</span>}
+            {isKeep && (
+              <div style={{ position: "relative", display: "flex", alignItems: "center", justifyContent: "center" }}>
+                <span style={{ fontSize: fP * 1.25 }}>🏰</span>
+                <span style={{ position: "absolute", bottom: -fT * 0.3, fontSize: Math.max(8, fT * 0.42), fontWeight: 700, color: "#6b8e23", background: "rgba(255,255,255,0.9)", borderRadius: 6, padding: "0 4px", lineHeight: 1.4 }}>Lv.{keepLevel}</span>
+              </div>
+            )}
+            {cell && !isKeep && <span style={{ fontSize: cell.kind === "building" ? fP : fP * 0.92, filter: "drop-shadow(0 1px 1px rgba(0,0,0,0.25))" }}>{cell.icon}</span>}
+            {isHover && item && !cell && !hasSite && t === "grass" && <span style={{ position: "absolute", fontSize: fP, opacity: 0.5, pointerEvents: "none" }}>{item.icon}</span>}
+            {overlay && <div style={{ position: "absolute", inset: 0, background: overlay, pointerEvents: "none" }} />}
+          </div>
+        );
+      }))}
+    </div>
+  );
+});
+function WorkerSheet({ w, resources, onSkill, onEquip }) {
+  const xn = xpNext(w.level), sp = w.skillPoints || 0;
+  const can = (cost) => cost && RES_ORDER.every(k => (resources[k] || 0) >= (cost[k] || 0));
+  const eCost = (slot, type) => { const cur = w.equip[slot]; if (!cur || cur.type !== type) return TIER_COST[0]; if (cur.tier >= 4) return null; return TIER_COST[cur.tier]; };
+  const g = w.equip && w.equip.gear;
+  const sB = g && g.type === "boots" ? g.tier * 12 : 0, mB = g && g.type === "gloves" ? g.tier * 15 : 0, bB = g && g.type === "bag" ? g.tier * 10 : 0;
+  const slotRow = (slot, types) => (
+    <div className="grid grid-cols-3 gap-1.5">
+      {types.map(t => {
+        const cur = w.equip[slot], eq = cur && cur.type === t.type, cost = eCost(slot, t.type), max = !cost, ok = can(cost);
+        return (
+          <button key={t.type} onClick={() => onEquip(slot, t.type)} disabled={!max && !ok}
+            className={`rounded-lg p-1.5 border text-center ${eq ? "border-emerald-500 bg-emerald-50" : "border-stone-200 bg-white"} ${(!max && !ok) ? "opacity-50" : ""}`}>
+            <div style={{ fontSize: 16 }}>{t.icon}</div>
+            <div className="text-[9px] font-semibold text-stone-700">{t.label}</div>
+            <div className="text-[8px] text-amber-600 h-2.5">{eq ? "★".repeat(cur.tier) : ""}</div>
+            <div className="text-[8px] text-stone-500">{max ? "MAX" : (eq ? "강화 " : "장착 ") + (cost ? RES_ORDER.filter(k => cost[k]).map(k => RES[k].icon + cost[k]).join("") : "")}</div>
+          </button>
+        );
+      })}
+    </div>
+  );
+  return (
+    <div className="bg-white/90 rounded-2xl p-3 shadow-sm border border-emerald-200">
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          <span style={{ fontSize: 24 }}>👷</span>
+          <div>
+            <div className="text-sm font-bold text-stone-800">{w.name} <span className="text-xs text-stone-500 font-normal">Lv.{w.level}</span></div>
+            <div className="text-[10px] text-stone-500">특기 {CAT_LABEL[w.spec]} {RES[w.spec === "wood" ? "wood" : w.spec === "mined" ? "stone" : "food"].icon}</div>
+          </div>
+        </div>
+        <div className="text-[11px] text-stone-600 text-right">스킬포인트<br /><b className="text-emerald-600 text-sm">{sp}</b></div>
+      </div>
+      <div className="mt-2 h-2 bg-stone-200 rounded-full overflow-hidden"><div className="h-full bg-sky-400" style={{ width: `${Math.min(100, (w.xp / xn) * 100)}%` }} /></div>
+      <div className="text-[9px] text-stone-400 mt-0.5">XP {Math.floor(w.xp)} / {xn}</div>
+      <div className="mt-2 grid grid-cols-3 gap-2">
+        {["wood", "mined", "food"].map(cat => (
+          <div key={cat} className="bg-stone-50 rounded-lg p-2 text-center">
+            <div className="text-[11px] font-semibold text-stone-700">{CAT_LABEL[cat]}</div>
+            <div className="text-[10px] text-stone-500">Lv {w.skills[cat] || 0} · +{(w.skills[cat] || 0) * 8}%</div>
+            <button disabled={sp <= 0} onClick={() => onSkill(cat)} className={`mt-1 w-full text-[12px] font-bold rounded-md py-0.5 ${sp > 0 ? "bg-emerald-600 text-white hover:bg-emerald-700" : "bg-stone-200 text-stone-400"}`}>＋</button>
+          </div>
+        ))}
+      </div>
+      <div className="text-[10px] font-semibold text-stone-500 mt-3 mb-1">🛠 도구 (특기 자원 채취량↑)</div>
+      {slotRow("tool", TOOL_TYPES)}
+      <div className="text-[10px] font-semibold text-stone-500 mt-2 mb-1">🎽 장비 (신발=이동 · 가방=채취량 · 장갑=채굴속도)</div>
+      {slotRow("gear", GEAR_TYPES)}
+      <div className="mt-2 text-[10px] text-stone-500">이동 +{sB}% · 채굴속도 +{mB}% · 채취량 +{bB}%</div>
+    </div>
+  );
+}
+const Panel = memo(function Panel({ tab, setTab, mode, setMode, selected, setSelected, resources, costFor, counts, workerCap }) {
+  const list = tab === "build" ? BUILDINGS : DECOR;
+  return (
+    <div>
+      <div className="flex gap-2 mb-2">
+        <TabBtn active={mode === "build" && tab === "build"} onClick={() => { setMode("build"); setTab("build"); }} icon={<Hammer size={15} />} label="건물" />
+        <TabBtn active={mode === "build" && tab === "decor"} onClick={() => { setMode("build"); setTab("decor"); }} icon={<Sparkles size={15} />} label="꾸미기" />
+        <TabBtn active={mode === "remove"} onClick={() => { setMode(m => m === "remove" ? "build" : "remove"); setSelected(null); }} icon={<Trash2 size={15} />} label="철거" />
+      </div>
+      {mode === "remove" ? (
+        <div className="text-xs text-stone-600 px-1 py-3 leading-relaxed">철거/취소할 대상을 지도에서 클릭하세요. 자원 절반을 돌려받아요. (본진 제외)</div>
+      ) : (
+        <div className="grid grid-cols-2 sm:grid-cols-5 gap-2">
+          {list.map(item => {
+            const cost = costFor(item), ok = RES_ORDER.every(k => (resources[k] || 0) >= (cost[k] || 0)), sel = selected === item.key;
+            const hutCap = item.key === "hut" && (STARTING_WORKERS + (counts.hut || 0)) >= workerCap, disabled = !ok || hutCap;
+            return (
+              <button key={item.key} onClick={() => setSelected(sel ? null : item.key)}
+                className={`relative rounded-xl p-2 text-left border transition ${sel ? "border-emerald-500 bg-emerald-50 ring-2 ring-emerald-300" : disabled ? "border-stone-200 bg-stone-50 opacity-60" : "border-stone-200 bg-white hover:border-emerald-300 hover:bg-emerald-50"}`}>
+                {item.hotkey && <span className="absolute top-1 right-1 text-[9px] font-bold text-stone-400 border border-stone-300 rounded px-1">{item.hotkey}</span>}
+                <div className="flex items-center gap-1.5"><span style={{ fontSize: 18 }}>{item.icon}</span><span className="text-[11px] font-semibold text-stone-800 leading-tight">{item.name}</span></div>
+                <div className="text-[9px] text-stone-500 mt-0.5 leading-tight">{item.desc || (item.charm ? `매력 +${item.charm}` : "")}</div>
+                <div className="flex flex-wrap gap-1 mt-1 text-[9px] font-medium">
+                  {RES_ORDER.filter(k => cost[k]).map(k => <span key={k} className={(resources[k] || 0) >= cost[k] ? "text-stone-700" : "text-red-500"}>{RES[k].icon}{cost[k]}</span>)}
+                </div>
+                {hutCap && <div className="text-[9px] text-red-500 mt-0.5">한도 초과</div>}
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+});
+
+function App() {
+  const [placed, setPlaced] = useState(emptyGrid);
+  const [resources, setResources] = useState({ wood: 80, stone: 50, food: 30, coal: 10, iron: 10, gold: 0, redstone: 0, diamond: 0, emerald: 0 });
+  const [keepLevel, setKeepLevel] = useState(1);
+  const [workers, setWorkers] = useState([]);
+  const [sitesView, setSitesView] = useState([]);
+  const [siteCells, setSiteCells] = useState(new Set());
+  const [selectedIds, setSelectedIds] = useState(new Set());
+  const [selected, setSelected] = useState(null);
+  const [mode, setMode] = useState("build");
+  const [tab, setTab] = useState("build");
+  const [hover, setHover] = useState(null);
+  const [dragBox, setDragBox] = useState(null);
+  const [workerVersion, setWorkerVersion] = useState(0);
+  const [msg, setMsg] = useState("일꾼을 클릭/드래그로 선택하고, 우클릭(또는 길게 누르기)으로 명령하세요! 한 명만 선택하면 능력치·장비 창이 열려요.");
+  const [boardW, setBoardW] = useState(0);
+  const [loaded, setLoaded] = useState(false);
+  const boardRef = useRef(null), workersRef = useRef([]), sitesRef = useRef([]), groupsRef = useRef({}), pr = useRef({ down: false }), msgTimer = useRef(null);
+  const multsRef = useRef({ wood: 1, mined: 1, food: 1 }), capsRef = useRef(300), resourcesRef = useRef(resources), placedRef = useRef(placed), siteCellsRef = useRef(siteCells), countsRef = useRef({}), selIdsRef = useRef(selectedIds), modeRef = useRef(mode), selBuildRef = useRef(selected), workerCapRef = useRef(4);
+  const counts = useMemo(() => { const c = {}; for (let r = 0; r < ROWS; r++) for (let cc = 0; cc < COLS; cc++) { const cell = placed[r][cc]; if (cell) c[cell.key] = (c[cell.key] || 0) + 1; } return c; }, [placed]);
+  const charm = useMemo(() => DECOR.reduce((s, d) => s + (counts[d.key] || 0) * d.charm, 0), [counts]);
+  const charmB = Math.min(0.2, Math.floor(charm / 30) * 0.02);
+  const workerCap = KEEP_LEVELS[keepLevel - 1].workers;
+  const cap = KEEP_LEVELS[keepLevel - 1].cap + 200 * (counts.storage || 0);
+  const workerTarget = Math.min(STARTING_WORKERS + (counts.hut || 0), workerCap);
+  useEffect(() => { resourcesRef.current = resources; }, [resources]);
+  useEffect(() => { placedRef.current = placed; }, [placed]);
+  useEffect(() => { siteCellsRef.current = siteCells; }, [siteCells]);
+  useEffect(() => { countsRef.current = counts; }, [counts]);
+  useEffect(() => { selIdsRef.current = selectedIds; }, [selectedIds]);
+  useEffect(() => { modeRef.current = mode; }, [mode]);
+  useEffect(() => { selBuildRef.current = selected; }, [selected]);
+  useEffect(() => { workerCapRef.current = workerCap; }, [workerCap]);
+  useEffect(() => { capsRef.current = cap; }, [cap]);
+  useEffect(() => { multsRef.current = { wood: 1 + 0.25 * (counts.mill || 0) + charmB, mined: 1 + 0.20 * (counts.mine || 0) + charmB, food: 1 + 0.30 * (counts.farm || 0) + charmB }; }, [counts, charmB]);
+  const toast = useCallback((t) => { setMsg(t); if (msgTimer.current) clearTimeout(msgTimer.current); msgTimer.current = setTimeout(() => setMsg(""), 2600); }, []);
+  const syncWorkers = useCallback(() => setWorkers([...workersRef.current]), []);
+  const bumpWorkers = useCallback(() => setWorkerVersion(v => v + 1), []);
+  useEffect(() => { if (!boardRef.current) return; const el = boardRef.current; const ro = new ResizeObserver(es => { for (const e of es) setBoardW(e.contentRect.width); }); ro.observe(el); setBoardW(el.getBoundingClientRect().width); return () => ro.disconnect(); }, []);
+  const makeWorker = useCallback((idx) => {
+    const spec = ["wood", "mined", "food"][idx % 3];
+    const node = NODES_SORTED.find(n => RES[n.res].cat === spec) || NODES_SORTED[idx % NODE_POOL] || NODES_SORTED[0];
+    const skills = { wood: 0, mined: 0, food: 0 }; skills[spec] = 1;
+    return { id: rid(), x: KEEP.x, y: KEEP.y, state: "toNode", node, target: { x: node.x, y: node.y }, carry: null, timer: 0, buildSite: null, resumeNode: null, name: NAMES[Math.floor(Math.random() * NAMES.length)], level: 1, xp: 0, skillPoints: 0, skills, equip: { tool: null, gear: null }, spec };
+  }, []);
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        if (window.storage) {
+          const res = await window.storage.get(SAVE_KEY);
+          if (res && res.value) {
+            const data = JSON.parse(res.value);
+            if (!cancelled && data) {
+              if (data.placed) { const g = emptyGrid(); data.placed.forEach((row, r) => row.forEach((k, c) => { if (k && KEY_INFO[k]) { const i = KEY_INFO[k]; g[r][c] = { kind: i.kind, key: k, icon: i.icon, name: i.name }; } })); setPlaced(g); }
+              if (data.resources) setResources(prev => ({ ...prev, ...data.resources }));
+              if (data.keepLevel) setKeepLevel(data.keepLevel);
+              if (Array.isArray(data.workers) && data.workers.length) {
+                workersRef.current = data.workers.map((sw, i) => {
+                  const spec = sw.spec || "wood";
+                  const node = NODES_SORTED.find(n => RES[n.res].cat === spec) || NODES_SORTED[i % NODE_POOL] || NODES_SORTED[0];
+                  return { id: rid(), x: KEEP.x, y: KEEP.y, state: "toNode", node, target: { x: node.x, y: node.y }, carry: null, timer: 0, buildSite: null, resumeNode: null, name: sw.name || "일꾼", level: sw.level || 1, xp: sw.xp || 0, skillPoints: sw.skillPoints || 0, skills: { wood: 0, mined: 0, food: 0, ...(sw.skills || {}) }, equip: sw.equip || { tool: null, gear: null }, spec };
+                });
+                setWorkers([...workersRef.current]);
+              }
+            }
+          }
+        }
+      } catch (e) {}
+      if (!cancelled) setLoaded(true);
+    })();
+    return () => { cancelled = true; };
+  }, []);
+  useEffect(() => {
+    if (!loaded) return;
+    const id = setTimeout(async () => {
+      try { if (window.storage) await window.storage.set(SAVE_KEY, JSON.stringify({ placed: placed.map(row => row.map(c => c ? c.key : null)), resources, keepLevel, workers: workersRef.current.map(w => ({ name: w.name, level: w.level, xp: w.xp, skillPoints: w.skillPoints, skills: w.skills, equip: w.equip, spec: w.spec })) })); } catch (e) {}
+    }, 700);
+    return () => clearTimeout(id);
+  }, [placed, resources, keepLevel, workerVersion, loaded]);
+  useEffect(() => {
+    const cur = workersRef.current;
+    if (cur.length < workerTarget) for (let i = cur.length; i < workerTarget; i++) cur.push(makeWorker(i));
+    else if (cur.length > workerTarget) { const rem = cur.splice(workerTarget); rem.forEach(w => { if (w.buildSite) w.buildSite.worker = null; }); }
+    syncWorkers();
+  }, [workerTarget, makeWorker, syncWorkers]);
+  useEffect(() => {
+    let raf, last = performance.now();
+    const wSpeed = (w) => SPEED * (1 + (w.equip && w.equip.gear && w.equip.gear.type === "boots" ? w.equip.gear.tier * 0.12 : 0));
+    const wMine = (w) => MINE_TIME / (1 + (w.equip && w.equip.gear && w.equip.gear.type === "gloves" ? w.equip.gear.tier * 0.15 : 0));
+    const wGather = (w, res) => {
+      const cat = RES[res].cat, gm = multsRef.current[cat] || 1, sk = 1 + (w.skills && w.skills[cat] ? w.skills[cat] : 0) * 0.08;
+      const tool = w.equip && w.equip.tool, toolM = (tool && tool.cat === cat) ? 1 + tool.tier * 0.15 : 1;
+      const gear = w.equip && w.equip.gear, bagM = (gear && gear.type === "bag") ? 1 + gear.tier * 0.10 : 1;
+      return Math.max(1, Math.round(RES[res].gather * gm * sk * toolM * bagM));
+    };
+    const moveStep = (w, dt, onArrive) => { const sp = wSpeed(w), dx = w.target.x - w.x, dy = w.target.y - w.y, d = Math.hypot(dx, dy); if (d < ARRIVE) onArrive(); else { const s = Math.min(d, sp * dt); w.x += dx / d * s; w.y += dy / d * s; } };
+    const loop = (now) => {
+      let dt = (now - last) / 1000; last = now; if (dt > 0.1) dt = 0.1;
+      const ws = workersRef.current, dep = {}, done = []; let leveled = false;
+      for (const w of ws) {
+        if (w.state === "moveTo") moveStep(w, dt, () => { w.state = "idle"; });
+        else if (w.state === "toNode") moveStep(w, dt, () => { w.state = "mining"; w.timer = wMine(w); });
+        else if (w.state === "toBuild") moveStep(w, dt, () => { w.state = "building"; });
+        else if (w.state === "toBase") moveStep(w, dt, () => {
+          if (w.carry) { dep[w.carry.type] = (dep[w.carry.type] || 0) + w.carry.amt; w.xp += w.carry.amt; while (w.xp >= xpNext(w.level)) { w.xp -= xpNext(w.level); w.level++; w.skillPoints += 2; leveled = true; } w.carry = null; }
+          if (w.node) { w.state = "toNode"; w.target = { x: w.node.x, y: w.node.y }; } else w.state = "idle";
+        });
+        else if (w.state === "mining") { w.timer -= dt; if (w.timer <= 0) { if (w.node) { w.carry = { type: w.node.res, amt: wGather(w, w.node.res) }; w.state = "toBase"; w.target = { x: KEEP.x, y: KEEP.y }; } else w.state = "idle"; } }
+        else if (w.state === "building") { const s = w.buildSite; if (!s || s.worker !== w.id) { w.state = w.node ? "toNode" : "idle"; w.buildSite = null; } else { s.progress += dt / s.build; if (s.progress >= 1) done.push({ s, w }); } }
+      }
+      const dk = Object.keys(dep);
+      if (dk.length) setResources(prev => { const n = { ...prev }, cv = capsRef.current; for (const k of dk) n[k] = Math.min(cv, (n[k] || 0) + dep[k]); return n; });
+      if (done.length) {
+        for (const { s, w } of done) { sitesRef.current = sitesRef.current.filter(x => x !== s); w.buildSite = null; if (w.resumeNode) { w.node = w.resumeNode; w.resumeNode = null; w.state = "toNode"; w.target = { x: w.node.x, y: w.node.y }; } else w.state = "idle"; }
+        setSiteCells(prev => { const n = new Set(prev); for (const { s } of done) n.delete(`${s.r}-${s.c}`); return n; });
+        setPlaced(prev => { const np = prev.map(row => row.slice()); for (const { s } of done) np[s.r][s.c] = { kind: s.kind, key: s.key, icon: s.icon, name: s.name }; return np; });
+        toast("건설 완료! 🏗️");
+      }
+      if (leveled) setWorkerVersion(v => v + 1);
+      setSitesView([...sitesRef.current]); setWorkers([...ws]);
+      raf = requestAnimationFrame(loop);
+    };
+    raf = requestAnimationFrame(loop);
+    return () => cancelAnimationFrame(raf);
+  }, [toast]);
+  const canPlace = useCallback((r, c, item) => {
+    if (!item || TERRAIN[r][c] !== "grass" || placedRef.current[r][c] || siteCellsRef.current.has(`${r}-${c}`)) return false;
+    if (item.place && item.place !== "grass") {
+      const want = item.place === "nearTree" ? (t => t === "tree") : item.place === "nearFood" ? (t => t === "food") : (t => FEAT[t] && FEAT[t].res !== "wood" && FEAT[t].res !== "food");
+      const nb = [[r - 1, c], [r + 1, c], [r, c - 1], [r, c + 1]];
+      if (!nb.some(([rr, cc]) => rr >= 0 && rr < ROWS && cc >= 0 && cc < COLS && want(TERRAIN[rr][cc]))) return false;
+    }
+    return true;
+  }, []);
+  const costFor = useCallback((item) => { if (item.kind === "decor") return item.cost; const n = countsRef.current[item.key] || 0, f = 1 + (item.scale || 0) * n, out = {}; for (const k in item.cost) out[k] = Math.ceil(item.cost[k] * f); return out; }, []);
+  const afford = useCallback((cost) => RES_ORDER.every(k => (resourcesRef.current[k] || 0) >= (cost[k] || 0)), []);
+  const deduct = useCallback((cost) => setResources(prev => { const n = { ...prev }; for (const k in cost) n[k] = (n[k] || 0) - cost[k]; return n; }), []);
+  const refund = useCallback((cost, f) => setResources(prev => { const n = { ...prev }, cv = capsRef.current; for (const k in cost) n[k] = Math.min(cv, (n[k] || 0) + Math.floor(cost[k] * f)); return n; }), []);
+  const setSel = useCallback((s) => { selIdsRef.current = s; setSelectedIds(new Set(s)); }, []);
+  const selectWorker = useCallback((id, shift) => { const s = new Set(selIdsRef.current); if (shift) { s.has(id) ? s.delete(id) : s.add(id); } else { s.clear(); s.add(id); } setSel(s); }, [setSel]);
+  const clearSelection = useCallback(() => setSel(new Set()), [setSel]);
+  const selectAll = useCallback(() => setSel(new Set(workersRef.current.map(w => w.id))), [setSel]);
+  const boxSelect = useCallback((x0, y0, x1, y1, shift) => { const minX = Math.min(x0, x1), maxX = Math.max(x0, x1), minY = Math.min(y0, y1), maxY = Math.max(y0, y1); const s = shift ? new Set(selIdsRef.current) : new Set(); for (const w of workersRef.current) if (w.x >= minX && w.x <= maxX && w.y >= minY && w.y <= maxY) s.add(w.id); setSel(s); }, [setSel]);
+  const assignGroup = useCallback((d) => { groupsRef.current[d] = Array.from(selIdsRef.current); toast(`제어 그룹 ${d} 지정 (${groupsRef.current[d].length})`); }, [toast]);
+  const selectGroup = useCallback((d) => { const arr = groupsRef.current[d] || []; setSel(new Set(arr.filter(id => workersRef.current.some(w => w.id === id)))); }, [setSel]);
+  const allocSkill = useCallback((id, cat) => { const w = workersRef.current.find(x => x.id === id); if (!w || w.skillPoints <= 0) return; w.skillPoints--; w.skills[cat] = (w.skills[cat] || 0) + 1; bumpWorkers(); syncWorkers(); }, [bumpWorkers, syncWorkers]);
+  const upgradeEquip = useCallback((id, slot, type) => {
+    const w = workersRef.current.find(x => x.id === id); if (!w) return;
+    const cur = w.equip[slot], def = (slot === "tool" ? TOOL_TYPES : GEAR_TYPES).find(t => t.type === type), cat = def ? def.cat || null : null;
+    let cost, makeNew = false;
+    if (!cur || cur.type !== type) { cost = TIER_COST[0]; makeNew = true; }
+    else { if (cur.tier >= 4) { toast("최대 강화 단계예요."); return; } cost = TIER_COST[cur.tier]; }
+    if (!afford(cost)) { toast("강화 자원이 부족해요."); return; }
+    deduct(cost);
+    if (makeNew) w.equip[slot] = { type, cat, tier: 1 }; else cur.tier++;
+    bumpWorkers(); syncWorkers(); toast(makeNew ? "장비를 장착했어요!" : "장비를 강화했어요! ✨");
+  }, [afford, deduct, toast, bumpWorkers, syncWorkers]);
+  const releaseBuild = (w) => { if (w.buildSite) { w.buildSite.worker = null; w.buildSite = null; } };
+  const moveWorker = (w, x, y) => { releaseBuild(w); w.node = null; w.state = "moveTo"; w.target = { x: clamp(x, 0.2, COLS - 0.2), y: clamp(y, 0.2, ROWS - 0.2) }; };
+  const gatherWorker = (w, node) => { releaseBuild(w); w.node = node; w.state = "toNode"; w.target = { x: node.x, y: node.y }; };
+  const assignBuilder = (w, site) => { releaseBuild(w); w.resumeNode = w.node || w.resumeNode; w.node = null; w.buildSite = site; site.worker = w.id; w.state = "toBuild"; w.target = { x: site.x, y: site.y }; };
+  const pickBuilder = (site) => { let pool = workersRef.current.filter(w => w.state !== "toBuild" && w.state !== "building"); const sel = pool.filter(w => selIdsRef.current.has(w.id)); if (sel.length) pool = sel; let best = null, bd = 1e9; for (const w of pool) { const d = (w.x - site.x) ** 2 + (w.y - site.y) ** 2; if (d < bd) { bd = d; best = w; } } return best; };
+  const doCommand = useCallback((fx, fy) => {
+    const ids = selIdsRef.current; if (!ids || ids.size === 0) { toast("먼저 일꾼을 선택하세요."); return; }
+    const r = clamp(Math.floor(fy), 0, ROWS - 1), c = clamp(Math.floor(fx), 0, COLS - 1);
+    const ws = workersRef.current.filter(w => ids.has(w.id)); if (!ws.length) return;
+    const site = sitesRef.current.find(s => s.r === r && s.c === c);
+    if (site) { let best = ws[0], bd = 1e9; for (const w of ws) { const d = (w.x - site.x) ** 2 + (w.y - site.y) ** 2; if (d < bd) { bd = d; best = w; } } assignBuilder(best, site); let i = 0; for (const w of ws) if (w !== best) { const o = formO(i++); moveWorker(w, site.x + o.dx, site.y + o.dy); } toast("일꾼이 건설하러 갑니다 🔨"); syncWorkers(); return; }
+    const node = NODE_MAP[r][c];
+    if (node) { for (const w of ws) gatherWorker(w, node); toast(`${RES[node.res].icon} ${RES[node.res].name} 채취!`); syncWorkers(); return; }
+    let i = 0; for (const w of ws) { const o = formO(i++); moveWorker(w, fx + o.dx, fy + o.dy); } syncWorkers();
+  }, [toast, syncWorkers]);
+  const placeAt = useCallback((r, c) => {
+    const item = KEY_INFO[selBuildRef.current]; if (!item) return;
+    if (!canPlace(r, c, item)) { if (TERRAIN[r][c] !== "grass") toast("잔디 위에만 지을 수 있어요."); else if (item.place === "nearTree") toast("🌳 나무 옆에 지어야 해요."); else if (item.place === "nearMined") toast("⛏️ 광맥 옆에 지어야 해요."); else if (item.place === "nearFood") toast("🌾 밭 옆에 지어야 해요."); else toast("여기엔 지을 수 없어요."); return; }
+    const cost = costFor(item); if (!afford(cost)) { toast("자원이 부족해요."); return; }
+    if (item.key === "hut") { const pending = sitesRef.current.filter(s => s.key === "hut").length; if (STARTING_WORKERS + (countsRef.current.hut || 0) + pending >= workerCapRef.current) { toast("일꾼 한도 도달 — 본진을 업그레이드하세요!"); return; } }
+    deduct(cost);
+    const site = { id: rid(), r, c, x: c + 0.5, y: r + 0.5, key: item.key, kind: item.kind, icon: item.icon, name: item.name, build: item.build || 4, progress: 0, worker: null };
+    sitesRef.current.push(site); setSiteCells(prev => { const n = new Set(prev); n.add(`${r}-${c}`); return n; });
+    const b = pickBuilder(site); if (b) assignBuilder(b, site); else toast("🔨 일꾼이 없어 일시정지 — 일꾼 선택 후 우클릭으로 배정하세요.");
+    setSitesView([...sitesRef.current]); syncWorkers();
+  }, [canPlace, costFor, afford, deduct, toast, syncWorkers]);
+  const removeAt = useCallback((r, c) => {
+    const site = sitesRef.current.find(s => s.r === r && s.c === c);
+    if (site) { const w = workersRef.current.find(x => x.id === site.worker); if (w) { w.buildSite = null; if (w.resumeNode) { w.node = w.resumeNode; w.resumeNode = null; w.state = "toNode"; w.target = { x: w.node.x, y: w.node.y }; } else w.state = "idle"; } sitesRef.current = sitesRef.current.filter(s => s !== site); setSiteCells(prev => { const n = new Set(prev); n.delete(`${r}-${c}`); return n; }); refund(KEY_INFO[site.key].cost, 0.5); setSitesView([...sitesRef.current]); syncWorkers(); toast("건설 취소, 자원 일부 환급."); return; }
+    const cell = placedRef.current[r][c]; if (!cell) return;
+    setPlaced(p => { const np = p.map(row => row.slice()); np[r][c] = null; return np; }); refund(KEY_INFO[cell.key].cost, 0.5); toast("철거, 자원 일부 환급.");
+  }, [refund, toast, syncWorkers]);
+  const posFromClient = useCallback((cx, cy) => { const rect = boardRef.current.getBoundingClientRect(); const x = clamp((cx - rect.left) / rect.width * COLS, 0, COLS - 0.001); const y = clamp((cy - rect.top) / rect.height * ROWS, 0, ROWS - 0.001); return { x, y, r: Math.floor(y), c: Math.floor(x) }; }, []);
+  const workerAt = (x, y) => { let best = null, bd = 0.36; for (const w of workersRef.current) { const d = (w.x - x) ** 2 + (w.y - y) ** 2; if (d < bd) { bd = d; best = w; } } return best; };
+  const onWinMove = useCallback((e) => {
+    if (!pr.current.down) return;
+    const dx = e.clientX - pr.current.cx, dy = e.clientY - pr.current.cy;
+    if (!pr.current.moved && Math.hypot(dx, dy) > 6) { pr.current.moved = true; if (pr.current.longTimer) clearTimeout(pr.current.longTimer); }
+    if (pr.current.moved && pr.current.button === 0 && modeRef.current !== "remove" && !(modeRef.current === "build" && selBuildRef.current)) { const p = posFromClient(e.clientX, e.clientY); setDragBox({ x0: pr.current.sx, y0: pr.current.sy, x1: p.x, y1: p.y }); }
+  }, [posFromClient]);
+  const onWinUp = useCallback((e) => {
+    window.removeEventListener("pointermove", onWinMove); window.removeEventListener("pointerup", onWinUp);
+    if (pr.current.longTimer) clearTimeout(pr.current.longTimer);
+    const wasDown = pr.current.down; pr.current.down = false; setDragBox(null); if (!wasDown) return;
+    const p = posFromClient(e.clientX, e.clientY), placement = modeRef.current === "build" && !!selBuildRef.current;
+    if (pr.current.longFired) return;
+    if (pr.current.button === 0 && modeRef.current === "remove" && !pr.current.moved) { removeAt(p.r, p.c); return; }
+    if (placement && pr.current.button === 0 && !pr.current.moved) { placeAt(p.r, p.c); return; }
+    if (pr.current.moved && pr.current.button === 0 && !placement && modeRef.current !== "remove") { boxSelect(pr.current.sx, pr.current.sy, p.x, p.y, pr.current.shift); return; }
+    if (pr.current.button === 0 && !pr.current.moved && !placement && modeRef.current !== "remove") { const w = workerAt(p.x, p.y); if (w) selectWorker(w.id, pr.current.shift); else if (!pr.current.shift) clearSelection(); }
+  }, [posFromClient, removeAt, placeAt, boxSelect, selectWorker, clearSelection, onWinMove]);
+  const onBoardPointerDown = useCallback((e) => {
+    if (e.button !== 0 && e.button !== 2) return;
+    const p = posFromClient(e.clientX, e.clientY);
+    pr.current = { down: true, sx: p.x, sy: p.y, cx: e.clientX, cy: e.clientY, moved: false, button: e.button, longFired: false, shift: e.shiftKey };
+    const placement = modeRef.current === "build" && !!selBuildRef.current;
+    if (e.button === 0 && !placement && modeRef.current !== "remove") { pr.current.longTimer = setTimeout(() => { if (pr.current.down && !pr.current.moved) { pr.current.longFired = true; doCommand(pr.current.sx, pr.current.sy); setDragBox(null); } }, 420); }
+    window.addEventListener("pointermove", onWinMove); window.addEventListener("pointerup", onWinUp);
+  }, [posFromClient, doCommand, onWinMove, onWinUp]);
+  const onContextMenu = useCallback((e) => { e.preventDefault(); if (modeRef.current === "build" && selBuildRef.current) { setSelected(null); return; } if (modeRef.current === "remove") return; const p = posFromClient(e.clientX, e.clientY); doCommand(p.x, p.y); }, [posFromClient, doCommand]);
+  const onBoardMove = useCallback((e) => { const p = posFromClient(e.clientX, e.clientY); setHover(h => (h && h.r === p.r && h.c === p.c) ? h : { r: p.r, c: p.c }); }, [posFromClient]);
+  useEffect(() => {
+    const onKey = (e) => {
+      if (e.key === "Escape") { if (selBuildRef.current) setSelected(null); else if (modeRef.current === "remove") setMode("build"); else clearSelection(); return; }
+      if ((e.key === "a" || e.key === "A") && !e.ctrlKey && !e.metaKey) { e.preventDefault(); selectAll(); return; }
+      if (/^Digit[1-9]$/.test(e.code)) { e.preventDefault(); const d = e.code.slice(5); if (e.shiftKey) assignGroup(d); else selectGroup(d); return; }
+      const b = BUILDINGS.find(x => x.hotkey === e.key.toUpperCase()); if (b) { setMode("build"); setSelected(b.key); }
+    };
+    window.addEventListener("keydown", onKey); return () => window.removeEventListener("keydown", onKey);
+  }, [clearSelection, selectAll, assignGroup, selectGroup]);
+  const upgradeKeep = () => { if (keepLevel >= KEEP_LEVELS.length) { toast("이미 최대 레벨이에요!"); return; } const next = KEEP_LEVELS[keepLevel]; if (!afford(next.cost)) { toast("본진 업그레이드 자원이 부족해요."); return; } deduct(next.cost); setKeepLevel(l => l + 1); toast(`본진이 Lv.${keepLevel + 1}(으)로 성장했어요! 🏰`); };
+  const reset = async () => { setPlaced(emptyGrid()); setResources({ wood: 80, stone: 50, food: 30, coal: 10, iron: 10, gold: 0, redstone: 0, diamond: 0, emerald: 0 }); setKeepLevel(1); setSelected(null); sitesRef.current = []; setSitesView([]); setSiteCells(new Set()); clearSelection(); const nw = []; for (let i = 0; i < STARTING_WORKERS; i++) nw.push(makeWorker(i)); workersRef.current = nw; setWorkers([...nw]); bumpWorkers(); toast("기지를 새로 시작했어요."); try { if (window.storage) await window.storage.delete(SAVE_KEY); } catch (e) {} };
+  const tile = boardW / COLS, fT = Math.max(9, tile * 0.5), fP = Math.max(10, tile * 0.58), fW = Math.max(10, tile * 0.46);
+  const nextCost = keepLevel < KEEP_LEVELS.length ? KEEP_LEVELS[keepLevel].cost : null;
+  const selWorker = selectedIds.size === 1 ? workers.find(w => selectedIds.has(w.id)) : null;
+  return (
+    <div className="w-full min-h-full bg-gradient-to-b from-sky-100 to-emerald-100 p-2 sm:p-4" style={{ fontFamily: "system-ui, sans-serif" }}>
+      <style>{`@keyframes hh-bob{0%,100%{transform:translateY(0)}50%{transform:translateY(-2px)}}`}</style>
+      <div className="max-w-[680px] mx-auto">
+        <div className="flex items-center justify-between mb-2">
+          <h1 className="text-lg font-extrabold text-stone-800">🏰 Hearthhold</h1>
+          <div className="flex items-center gap-2">
+            <span className="text-xs text-stone-600 bg-white/70 rounded-lg px-2 py-1 flex items-center gap-1"><MousePointer2 size={12} />선택 {selectedIds.size}</span>
+            <button onClick={reset} className="flex items-center gap-1 text-xs text-stone-600 bg-white/70 rounded-lg px-2 py-1 hover:bg-white"><RotateCcw size={13} />새로</button>
+          </div>
+        </div>
+        <div className="mb-2"><ResourceBarM resources={resources} cap={cap} /></div>
+        <div className="flex flex-wrap items-center gap-2 mb-2">
+          <span className="flex items-center gap-1 bg-white/85 rounded-lg px-2 py-1 text-xs shadow-sm">✨<span className="text-stone-500">매력</span><span className="font-bold text-stone-800">{charm}</span></span>
+          <span className="flex items-center gap-1 bg-white/85 rounded-lg px-2 py-1 text-xs shadow-sm">👷<span className="text-stone-500">일꾼</span><span className="font-bold text-stone-800">{workers.length}/{workerCap}</span></span>
+          <button onClick={upgradeKeep} className="ml-auto flex items-center gap-1 text-xs font-semibold text-white bg-amber-600 hover:bg-amber-700 rounded-lg px-2.5 py-1.5 shadow-sm">
+            <ChevronUp size={14} /> 본진 Lv.{keepLevel}{nextCost ? ` →${keepLevel + 1}` : " (MAX)"}
+            {nextCost && <span className="font-normal opacity-90 ml-1">{RES_ORDER.filter(k => nextCost[k]).map(k => `${RES[k].icon}${nextCost[k]}`).join(" ")}</span>}
+          </button>
+        </div>
+        <div ref={boardRef} onPointerDown={onBoardPointerDown} onPointerMove={onBoardMove} onPointerLeave={() => setHover(null)} onContextMenu={onContextMenu}
+          className="relative w-full rounded-2xl overflow-hidden shadow-lg ring-1 ring-black/10 touch-none select-none"
+          style={{ aspectRatio: `${COLS} / ${ROWS}`, background: "#84c06d", cursor: (mode === "build" && selected) || mode === "remove" ? "crosshair" : "default" }}>
+          <Board placed={placed} siteCells={siteCells} keepLevel={keepLevel} selBuild={selected} mode={mode} hover={hover} canPlace={canPlace} fT={fT} fP={fP} />
+          <div className="absolute inset-0" style={{ pointerEvents: "none" }}>
+            {sitesView.map(s => (
+              <div key={s.id} style={{ position: "absolute", left: `${(s.x / COLS) * 100}%`, top: `${(s.y / ROWS) * 100}%`, transform: "translate(-50%,-50%)", width: `${100 / COLS}%`, textAlign: "center" }}>
+                <span style={{ fontSize: fP, opacity: 0.55, filter: "grayscale(0.4)" }}>{s.icon}</span>
+                <div style={{ height: 3, background: "rgba(0,0,0,0.25)", borderRadius: 3, margin: "1px 15% 0" }}><div style={{ height: "100%", width: `${Math.min(100, s.progress * 100)}%`, background: s.worker ? "#34d399" : "#fbbf24", borderRadius: 3 }} /></div>
+              </div>
+            ))}
+            {workers.map(w => {
+              const sel = selectedIds.has(w.id);
+              return (
+                <div key={w.id} style={{ position: "absolute", left: `${(w.x / COLS) * 100}%`, top: `${(w.y / ROWS) * 100}%`, transform: "translate(-50%,-62%)", fontSize: fW, lineHeight: 1 }}>
+                  {sel && <div style={{ position: "absolute", left: "50%", top: "82%", transform: "translate(-50%,-50%)", width: fW * 1.15, height: fW * 0.55, border: "2px solid #16a34a", borderRadius: "50%", boxShadow: "0 0 4px #16a34a" }} />}
+                  <span style={{ display: "inline-block", position: "relative", animation: (w.state === "mining" || w.state === "building") ? "hh-bob 0.5s ease-in-out infinite" : "none" }}>👷</span>
+                  {w.state === "building" && <span style={{ position: "absolute", top: -fW * 0.5, left: "55%", fontSize: fW * 0.55 }}>🔨</span>}
+                  {w.carry && <span style={{ position: "absolute", top: -fW * 0.55, left: "50%", transform: "translateX(-50%)", fontSize: fW * 0.55 }}>{RES[w.carry.type].icon}</span>}
+                </div>
+              );
+            })}
+            {dragBox && <div style={{ position: "absolute", left: `${Math.min(dragBox.x0, dragBox.x1) / COLS * 100}%`, top: `${Math.min(dragBox.y0, dragBox.y1) / ROWS * 100}%`, width: `${Math.abs(dragBox.x1 - dragBox.x0) / COLS * 100}%`, height: `${Math.abs(dragBox.y1 - dragBox.y0) / ROWS * 100}%`, border: "2px solid #16a34a", background: "rgba(34,197,94,0.15)" }} />}
+          </div>
+        </div>
+        {msg && <div className="mt-2 text-xs text-stone-700 bg-white/85 rounded-lg px-3 py-2 shadow-sm leading-relaxed">{msg}</div>}
+        {selWorker && <div className="mt-3"><WorkerSheet w={selWorker} resources={resources} onSkill={(cat) => allocSkill(selWorker.id, cat)} onEquip={(s, t) => upgradeEquip(selWorker.id, s, t)} /></div>}
+        <div className="mt-3 bg-white/70 rounded-2xl p-3 shadow-sm">
+          <Panel tab={tab} setTab={setTab} mode={mode} setMode={setMode} selected={selected} setSelected={setSelected} resources={resources} costFor={costFor} counts={counts} workerCap={workerCap} />
+        </div>
+        <div className="mt-2 text-[10px] text-stone-500 leading-relaxed px-1">
+          클릭=선택 · 드래그=범위선택 · 우클릭/길게=명령 · 한 명 선택 시 능력치·장비 창 · A=전체 · 숫자=그룹 / Shift+숫자=지정 · Esc=취소 · 건물 H D L M F
+        </div>
+        <button onClick={() => toast("전투 페이지는 다음 버전에서 만들 예정이에요! ⚔️🏰")}
+          className="mt-3 w-full flex items-center justify-center gap-2 text-sm font-semibold text-stone-500 bg-stone-200/70 rounded-xl py-2.5 hover:bg-stone-200">
+          <Lock size={15} /> 전투 출정 <span className="text-xs font-normal">(다음 업데이트 예정)</span> <Swords size={15} />
+        </button>
+      </div>
+    </div>
+  );
+}
+
+createRoot(document.getElementById("root")).render(<App />);
+</script>
+</body>
+</html>
